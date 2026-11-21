@@ -22,10 +22,7 @@ func ExpandHome(path string) string {
 
 func DefaultIgnores() []string {
 	return []string{
-		".git",
-		".gitignore",
 		".DS_Store",
-		"lazy-lock.json",
 		"*.so", // Wildcards are handled in the symlink engine
 		"*.o",
 	}
@@ -39,6 +36,7 @@ type Symlink struct {
 	Source string   `yaml:"source"`
 	Target string   `yaml:"target"`
 	Type   string   `yaml:"type,omitempty"`
+  Action string   `yaml:"action,omitempty"` // "symlink" (default) or "copy"
 	Ignore []string `yaml:"ignore,omitempty"`
 }
 

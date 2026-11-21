@@ -2,6 +2,7 @@ package symlink
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"dotmgr/internal/config"
@@ -23,31 +24,36 @@ func Apply(configPath string, dryRun bool) error {
 			continue
 		}
 
-		// If it's a directory, we ALWAYS use the ignore logic
+		// Handle Directories
 		if link.Type == "dir" {
-			// Combine the user's custom ignores with our default ignores
 			allIgnores := append(config.DefaultIgnores(), link.Ignore...)
-			if err := linkDirectoryWithIgnores(src, dst, allIgnores, dryRun); err != nil {
+			if err := linkDirectory(src, dst, link.Action, allIgnores, dryRun); err != nil {
 				return err
 			}
 			continue
 		}
 
-		// Normal file symlink
+		// Handle Single Files
 		if dryRun {
-			fmt.Printf("  [Dry Run] Would link %s -> %s\n", src, dst)
+			fmt.Printf("  [Dry Run] Would %s: %s -> %s\n", link.Action, src, dst)
 			continue
 		}
 
-		if err := createSymlink(src, dst); err != nil {
-			return err
+		if link.Action == "copy" {
+			if err := copyFile(src, dst); err != nil {
+				return err
+			}
+			fmt.Printf("  [+] Copied: %s\n", dst)
+		} else {
+			if err := createSymlink(src, dst); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
 }
 
-func linkDirectoryWithIgnores(srcDir, dstDir string, ignores []string, dryRun bool) error {
-	// 1. Ensure the destination directory exists (DO NOT back up an existing directory)
+func linkDirectory(srcDir, dstDir, action string, ignores []string, dryRun bool) error {
 	if !dryRun {
 		if err := os.MkdirAll(dstDir, 0755); err != nil {
 			return fmt.Errorf("failed to create target dir %s: %w", dstDir, err)
@@ -56,37 +62,48 @@ func linkDirectoryWithIgnores(srcDir, dstDir string, ignores []string, dryRun bo
 
 	entries, err := os.ReadDir(srcDir)
 	if err != nil {
-		return fmt.Errorf("failed to read source dir %s: %w", srcDir, err)
+		return err
 	}
 
 	for _, entry := range entries {
 		name := entry.Name()
 
-		// 2. Check if this entry is in the ignore list
+		// Check ignores
 		ignored := false
 		for _, ig := range ignores {
-			// Use filepath.Match to support wildcards like *.so
 			matched, _ := filepath.Match(ig, name)
 			if matched {
 				ignored = true
 				break
 			}
 		}
-
 		if ignored {
 			fmt.Printf("  [~] Ignored (leaving local): %s\n", name)
 			continue
 		}
 
-		// 3. Link the non-ignored files
 		srcPath := filepath.Join(srcDir, name)
 		dstPath := filepath.Join(dstDir, name)
 
 		if dryRun {
-			fmt.Printf("  [Dry Run] Would link %s -> %s\n", srcPath, dstPath)
+			fmt.Printf("  [Dry Run] Would %s: %s -> %s\n", action, srcPath, dstPath)
 		} else {
-			if err := createSymlink(srcPath, dstPath); err != nil {
-				return err
+			if entry.IsDir() {
+				// Recursive directory copy (if action is copy)
+				if action == "copy" {
+					if err := copyDir(srcPath, dstPath); err != nil { return err }
+					fmt.Printf("  [+] Copied dir: %s\n", dstPath)
+				} else {
+					if err := createSymlink(srcPath, dstPath); err != nil { return err }
+				}
+			} else {
+				// File
+				if action == "copy" {
+					if err := copyFile(srcPath, dstPath); err != nil { return err }
+					fmt.Printf("  [+] Copied: %s\n", dstPath)
+				} else {
+					if err := createSymlink(srcPath, dstPath); err != nil { return err }
+				}
 			}
 		}
 	}
@@ -94,27 +111,57 @@ func linkDirectoryWithIgnores(srcDir, dstDir string, ignores []string, dryRun bo
 }
 
 func createSymlink(src, dst string) error {
-	// Backup existing if it's not our symlink
+	// Backup existing
 	if _, err := os.Lstat(dst); err == nil {
 		existingTarget, _ := os.Readlink(dst)
 		if existingTarget == src {
 			fmt.Printf("  [~] Already linked: %s\n", dst)
 			return nil
 		}
-
-		backupPath := dst + ".bak"
-		fmt.Printf("  [!] Backing up %s -> %s\n", dst, backupPath)
-		os.RemoveAll(backupPath)
-		if err := os.Rename(dst, backupPath); err != nil {
-			return fmt.Errorf("failed to backup %s: %w", dst, err)
-		}
+		os.RemoveAll(dst + ".bak")
+		os.Rename(dst, dst+".bak")
 	}
 
 	if err := os.Symlink(src, dst); err != nil {
-		return fmt.Errorf("failed to link %s -> %s: %w", src, dst, err)
+		return err
 	}
 	fmt.Printf("  [+] Linked: %s\n", dst)
 	return nil
+}
+
+func copyFile(src, dst string) error {
+	// Backup existing
+	if _, err := os.Stat(dst); err == nil {
+		os.RemoveAll(dst + ".bak")
+		os.Rename(dst, dst+".bak")
+	}
+
+	in, err := os.Open(src)
+	if err != nil { return err }
+	defer in.Close()
+
+	out, err := os.Create(dst)
+	if err != nil { return err }
+	defer out.Close()
+
+	_, err = io.Copy(out, in)
+	return err
+}
+
+func copyDir(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil { return err }
+
+		relPath, err := filepath.Rel(src, path)
+		if err != nil { return err }
+		targetPath := filepath.Join(dst, relPath)
+
+		if info.IsDir() {
+			return os.MkdirAll(targetPath, info.Mode())
+		}
+
+		return copyFile(path, targetPath)
+	})
 }
 
 func Status(configPath string) error {
